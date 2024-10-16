@@ -1,36 +1,19 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 )
 
-type CustomSong struct {
-	Id        string `json:"id"`
-	Title     string `json:"title"`
-	ImageURL  string `json:"image_url"`
-	Lyric     string `json:"lyric"`
-	AudioURL  string `json:"audio_url"`
-	VideoURL  string `json:"video_url"`
-	CreatedAt string `json:"created_at"`
-	ModelName string `json:"model_name"`
-	Status    string `json:"status"`
-	GPTDesc   string `json:"gpt_description_prompt"`
-	Prompt    string `json:"prompt"`
-	Type      string `json:"type"`
-	Tags      string `json:"tags"`
-}
-
 type Player struct {
-	// Image image?
-	Username string `json:"username"`
+	Nick string `json:"username"`
 }
 
 type Lobby struct {
-	// Players     []string `json:"players"`
 	Id          string   `json:"id"`
 	Players     []Player `json:"players"`
 	PromptTitle string   `json:"prompttitle"`
@@ -48,52 +31,19 @@ func generateId() string {
 }
 
 // TODO: Fazer integração com firebase
-// TODO: Considerar refazer com gin
 
 func main() {
-	r := mux.NewRouter()
 
-	r.HandleFunc("/generateSong", func(w http.ResponseWriter, r *http.Request) {
-		client := &http.Client{}
-		req, err := http.NewRequest("POST", baseApiUrl+"/api/custom_generate", r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
+	router := gin.Default()
 
-		var song CustomSong
-		json.NewDecoder(resp.Body).Decode(&song)
-
-		defer resp.Body.Close()
-
-		//TODO: Descobrir como fazer para devolvar a resposta, já que a song tá completamente vazia
-
-		json.NewEncoder(w).Encode(song)
-		// // Só exibindo corpo da resposta para verificar se a geração foi bem sucedida
-		// body, err := io.ReadAll(resp.Body)
-		// if err != nil {
-		// 	http.Error(w, err.Error(), http.StatusInternalServerError)
-		// 	return
-		// }
-		// fmt.Println(string(body))
-		// _, err = io.Copy(w, resp.Body)
-		// if err != nil {
-		// 	http.Error(w, err.Error(), http.StatusInternalServerError)
-		// 	return
-		// }
-	}).Methods("GET")
-
-	r.HandleFunc("/createLobby", func(w http.ResponseWriter, r *http.Request) {
+	// Criar lobby
+	router.POST("/lobby", func(c *gin.Context) {
 		var player Player
 
-		// TODO: Descobrir porque o nome do player não aparece na criação do lobby, mandando um vazio
-
-		json.NewDecoder(r.Body).Decode(&player)
+		if err := c.ShouldBindJSON(&player); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
 		players := []Player{player}
 
@@ -101,44 +51,68 @@ func main() {
 		newLobby := Lobby{Id: id, Players: players}
 		lobbies[id] = newLobby
 
-		json.NewEncoder(w).Encode(newLobby)
-	}).Methods("POST")
+		c.JSON(http.StatusCreated, gin.H{"lobbyid": id})
+	})
 
-	r.HandleFunc("/joinLobby/{id}", func(w http.ResponseWriter, r *http.Request) {
-		var player Player
+	// Entrar em lobby existente
+	router.GET("/lobby/:id", func(c *gin.Context) {
+		id := c.Param("id")
 
-		json.NewDecoder(r.Body).Decode(&player)
-
-		vars := mux.Vars(r)
-
-		lobby := lobbies[vars["id"]]
-		lobby.Players = append(lobby.Players, player)
-		lobbies[vars["id"]] = lobby
-		json.NewEncoder(w).Encode(lobby)
-	}).Methods("GET")
-
-	r.HandleFunc("/gameId={id}", func(w http.ResponseWriter, r *http.Request) {
-		// TODO: Fazer a lógica de quando se inicia um jogo
-		// Penso que tem que ser algo com a função randomica, sorteando quem vai fazer cada um. Talvez tivesse que colocar um campo bool no player pra verificar se ele já jogou
-
-	}).Methods("GET")
-
-	r.HandleFunc("/gameId={id}&setGenre", func(w http.ResponseWriter, r *http.Request) {
-		var genre struct {
-			Genre string `json:"genre"`
+		if len(lobbies[id].Players) == 4 {
+			c.JSON(http.StatusForbidden, gin.H{"message": "servidor cheio"})
+			return
 		}
 
-		json.NewDecoder(r.Body).Decode(&genre)
+		var player Player
 
-		vars := mux.Vars(r)
+		if err := c.ShouldBindJSON(&player); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-		lobby := lobbies[vars["id"]]
-		lobby.PromptGenre = genre.Genre
-		lobbies[vars["id"]] = lobby
+		lobby, exists := lobbies[id]
 
-		json.NewEncoder(w).Encode(lobby)
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"message": "lobby informado não existe"})
+			return
+		}
 
-	}).Methods("POST")
+		lobby.Players = append(lobby.Players, player)
+		lobbies[id] = lobby
 
-	http.ListenAndServe(":8080", r)
+		c.JSON(http.StatusFound, gin.H{"lobbyfounded": lobby})
+	})
+
+	// Gerar música
+	router.POST("/lobby/:id/song", func(c *gin.Context) {
+		client := &http.Client{}
+
+		req, err := http.NewRequest("POST", baseApiUrl+"/api/custom_generate", c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+
+		// TODO: descobrir como fazer para recuperar as infos da música gerada, usando solução provisória
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+
+		fmt.Println(string(body))
+
+		c.JSON(http.StatusCreated, gin.H{"data": string(body)})
+
+	})
+
+	router.Run(":8080")
 }
